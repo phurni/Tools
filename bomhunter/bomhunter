@@ -1,0 +1,92 @@
+#!/usr/bin/env ruby
+
+# BOM Hunter
+#
+# Scans directories for files containing a BOM and blame them.
+# You may also remove the BOM from those files.
+# The `micro-optparse` gem is required, you may also have its only file in the same
+# directory as this script.
+#
+# Copyright 2015 Pascal Hurni
+# License: MIT
+
+require 'find'
+require 'tempfile'
+
+# Load micro-optparse either from gem or from local
+begin
+  require 'micro-optparse'
+rescue LoadError
+  require_relative 'micro-optparse'
+end
+
+# Define BOM for each known encoding, sorted by inverse BOM byte size
+BOMS = {
+  Encoding::UTF_32LE   => "\xFF\xFE\x00\x00".force_encoding("ASCII-8BIT"),
+  Encoding::UTF_32BE   => "\x00\x00\xFE\xFF".force_encoding("ASCII-8BIT"),
+  Encoding::UTF_8      => "\xEF\xBB\xBF".force_encoding("ASCII-8BIT"),
+  Encoding::UTF_16LE   => "\xFF\xFE".force_encoding("ASCII-8BIT"),
+  Encoding::UTF_16BE   => "\xFE\xFF".force_encoding("ASCII-8BIT"),
+}
+
+# Read the BOM from the passed file, the Encoding is returned if a recognized BOM is found, false if no BOM found and nil in case of errors (a message is also output on STDERR)
+def read_bom(path)
+  file_bom = File.open(path, 'rb') {|file| file.read(4) }
+  return false unless file_bom
+  
+  bom = BOMS.find {|encoding, bom_bytes| file_bom[0...bom_bytes.size] == bom_bytes }
+  bom ? bom.first : false
+rescue
+  $stderr.puts "Can't read BOM for #{path}, #{$!.message}"
+end
+
+# Remove the BOM from the file if it exists, returns true if anything removed, false if not and nil in case of errors (a message is also output on STDERR)
+def remove_bom(path, encoding = nil)
+  unless bom_size = BOMS[encoding].size
+    return $stderr.puts "No known BOM for #{encoding.name}, BOM not removed for #{path}"
+  end
+  
+  # Open both the file and a temp file as a buffer
+  Tempfile.open('bomhunter') do |temp|
+    File.open(path, 'rb') do |input|
+      # First part: read the BOM to strip it and copy the rest of the file
+      input.read(bom_size)
+      IO.copy_stream(input, temp)
+      
+      # Second part: Copy the temp file back to the original (this technique keeps the same inode thus has no need to have write access on the file's directory)
+      input.reopen(path, 'wb')
+      temp.rewind
+      IO.copy_stream(temp, input)
+    end
+  end
+  
+rescue
+  $stderr.puts "\nCan't remove BOM for #{path}, #{$!.message}"
+end
+
+# Parse the options
+options = Parser.new do |p|
+  p.banner = "Scans directories for files containing a BOM, blame them and also remove them if desired."
+  p.version = "1.0.0"
+  p.option :remove, "Remove the BOM from the files", :default => false
+  p.option :type, "Show the BOM type in the output", :default => true
+  p.option :verbose, "Enable verbose output", :default => false
+end.process!
+
+# Operate !
+Find.find(*ARGV) do |path|
+  unless File.directory?(path)
+    if encoding = read_bom(path)
+      print encoding.name.ljust(12) if options[:type]
+      print path
+      
+      if options[:remove] && remove_bom(path, encoding)
+        print " ... Removed BOM" if options[:verbose]
+      end
+
+      puts
+    elsif options[:verbose]
+      puts "#{''.ljust(12)}#{path}"
+    end
+  end
+end
